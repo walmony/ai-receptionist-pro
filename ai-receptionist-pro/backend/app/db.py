@@ -1,11 +1,19 @@
 import os
-from supabase import create_client, Client
+import httpx
 
-SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
 
-
-def get_supabase() -> Client:
+def supabase_headers():
     if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
         raise RuntimeError("SUPABASE_URL o SUPABASE_SERVICE_KEY mancanti")
-    return create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+
+    return {
+        "apikey": SUPABASE_SERVICE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "return=representation"
+    }
+
+def supabase_rest_url(table):
+    return f"{SUPABASE_URL}/rest/v1/{table}"
