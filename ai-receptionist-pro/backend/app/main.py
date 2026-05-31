@@ -1,10 +1,13 @@
 import os
 from typing import Optional
+
+import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 from openai import OpenAI
-from .db import get_supabase
+from pydantic import BaseModel
+
+from .db import supabase_headers, supabase_rest_url
 
 app = FastAPI(title="AI Receptionist Pro")
 
@@ -35,6 +38,51 @@ class TestChatIn(BaseModel):
     assistant_id: str
     message: str
 
+def supabase_get(table, params=None):
+    r = httpx.get(
+        supabase_rest_url(table),
+        headers=supabase_headers(),
+        params=params or {},
+        timeout=20
+    )
+    if r.status_code >= 400:
+        raise HTTPException(status_code=r.status_code, detail=r.text)
+    return r.json()
+
+def supabase_post(table, payload):
+    r = httpx.post(
+        supabase_rest_url(table),
+        headers=supabase_headers(),
+        json=payload,
+        timeout=20
+    )
+    if r.status_code >= 400:
+        raise HTTPException(status_code=r.status_code, detail=r.text)
+    return r.json()
+
+def supabase_patch(table, row_id, payload):
+    r = httpx.patch(
+        supabase_rest_url(table),
+        headers=supabase_headers(),
+        params={"id": f"eq.{row_id}"},
+        json=payload,
+        timeout=20
+    )
+    if r.status_code >= 400:
+        raise HTTPException(status_code=r.status_code, detail=r.text)
+    return r.json()
+
+def supabase_delete(table, row_id):
+    r = httpx.delete(
+        supabase_rest_url(table),
+        headers=supabase_headers(),
+        params={"id": f"eq.{row_id}"},
+        timeout=20
+    )
+    if r.status_code >= 400:
+        raise HTTPException(status_code=r.status_code, detail=r.text)
+    return True
+
 @app.get("/")
 def home():
     return {"ok": True, "app": "AI Receptionist Pro", "status": "online"}
@@ -45,72 +93,102 @@ def health():
 
 @app.get("/assistants")
 def list_assistants():
-    sb = get_supabase()
-    res = sb.table("assistants").select("*").order("created_at", desc=True).execute()
-    return {"items": res.data}
+    items = supabase_get(
+        "assistants",
+        {
+            "select": "*",
+            "order": "created_at.desc"
+        }
+    )
+    return {"items": items}
 
 @app.post("/assistants")
 def create_assistant(data: AssistantIn):
-    sb = get_supabase()
-    res = sb.table("assistants").insert(data.model_dump()).execute()
-    return {"item": res.data[0] if res.data else None}
+    items = supabase_post("assistants", data.model_dump())
+    return {"item": items[0] if items else None}
 
 @app.put("/assistants/{assistant_id}")
 def update_assistant(assistant_id: str, data: AssistantIn):
-    sb = get_supabase()
-    res = sb.table("assistants").update(data.model_dump()).eq("id", assistant_id).execute()
-    return {"item": res.data[0] if res.data else None}
+    items = supabase_patch("assistants", assistant_id, data.model_dump())
+    return {"item": items[0] if items else None}
 
 @app.delete("/assistants/{assistant_id}")
 def delete_assistant(assistant_id: str):
-    sb = get_supabase()
-    sb.table("assistants").delete().eq("id", assistant_id).execute()
+    supabase_delete("assistants", assistant_id)
     return {"ok": True}
 
 @app.get("/faqs")
 def list_faqs(assistant_id: Optional[str] = None):
-    sb = get_supabase()
-    q = sb.table("faqs").select("*").order("created_at", desc=True)
+    params = {
+        "select": "*",
+        "order": "created_at.desc"
+    }
+
     if assistant_id:
-        q = q.eq("assistant_id", assistant_id)
-    res = q.execute()
-    return {"items": res.data}
+        params["assistant_id"] = f"eq.{assistant_id}"
+
+    items = supabase_get("faqs", params)
+    return {"items": items}
 
 @app.post("/faqs")
 def create_faq(data: FaqIn):
-    sb = get_supabase()
-    res = sb.table("faqs").insert(data.model_dump()).execute()
-    return {"item": res.data[0] if res.data else None}
+    items = supabase_post("faqs", data.model_dump())
+    return {"item": items[0] if items else None}
 
 @app.delete("/faqs/{faq_id}")
 def delete_faq(faq_id: str):
-    sb = get_supabase()
-    sb.table("faqs").delete().eq("id", faq_id).execute()
+    supabase_delete("faqs", faq_id)
     return {"ok": True}
 
 @app.get("/calls")
 def list_calls():
-    sb = get_supabase()
-    res = sb.table("calls").select("*").order("created_at", desc=True).limit(100).execute()
-    return {"items": res.data}
+    items = supabase_get(
+        "calls",
+        {
+            "select": "*",
+            "order": "created_at.desc",
+            "limit": "100"
+        }
+    )
+    return {"items": items}
 
 @app.post("/test-chat")
 def test_chat(data: TestChatIn):
     api_key = os.getenv("OPENAI_API_KEY", "")
+
     if not api_key:
         raise HTTPException(status_code=400, detail="OPENAI_API_KEY mancante su Render")
 
-    sb = get_supabase()
-    assistant_res = sb.table("assistants").select("*").eq("id", data.assistant_id).limit(1).execute()
-    if not assistant_res.data:
-        raise HTTPException(status_code=404, detail="Assistente non trovato")
-    assistant = assistant_res.data[0]
+    assistants = supabase_get(
+        "assistants",
+        {
+            "select": "*",
+            "id": f"eq.{data.assistant_id}",
+            "limit": "1"
+        }
+    )
 
-    faqs_res = sb.table("faqs").select("question,answer").eq("assistant_id", data.assistant_id).execute()
-    faq_text = "\n".join([f"D: {x['question']}\nR: {x['answer']}" for x in faqs_res.data])
+    if not assistants:
+        raise HTTPException(status_code=404, detail="Assistente non trovato")
+
+    assistant = assistants[0]
+
+    faqs = supabase_get(
+        "faqs",
+        {
+            "select": "question,answer",
+            "assistant_id": f"eq.{data.assistant_id}"
+        }
+    )
+
+    faq_text = "\n".join([
+        f"D: {x.get('question', '')}\nR: {x.get('answer', '')}"
+        for x in faqs
+    ])
 
     client = OpenAI(api_key=api_key)
-    system = f"""{assistant.get('system_prompt','')}
+
+    system = f"""{assistant.get("system_prompt", "")}
 
 Usa queste FAQ quando servono:
 {faq_text}
@@ -124,4 +202,5 @@ Rispondi in italiano. Sii breve, chiaro e professionale."""
             {"role": "user", "content": data.message},
         ],
     )
+
     return {"reply": completion.choices[0].message.content}
